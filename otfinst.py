@@ -114,6 +114,7 @@ optionMappings = {
   'condensed' : 'c',
   'cond' : 'c',
   'narrow' : 'n',
+  'thin' : 'n',
   'semicondensed' : 'sc',
   'semiextended' : 'sx',
   'extended' : 'x',
@@ -178,7 +179,7 @@ CFFRE = re.compile("CFF")
 # User can redefine if necessary; used to prune candidate list of fonts
 def isValidFontFile(filename):
   # return os.system("otfinfo --info -q %s" % filename) == 0
-  fields = os.popen("otfinfo -qt %s" % filename, 'r').readlines()
+  fields = os.popen("otfinfo -qt '%s'" % filename, 'r').readlines()
   # otfinfo -qt returns the fields in the font file; "glyf" means TrueType
   # and "CFF" means PostScript
   for line in fields:
@@ -241,7 +242,7 @@ def generateFontfiles(l):
 
 otfinfoversionRE = re.compile("([0-9]+\.[0-9]+)")
 otfinfoRE = re.compile("^(.*):\s+(.*)$")
-urlRE = re.compile("(\w*)\.com")
+urlRE = re.compile("(\w*)\.(com|net|org|edu|de|fr|co\.uk)")
 opticalRE = re.compile("size range \(([\d.]+) pt, ([\d.]+) pt\]")
 
 # list-to-string and string-to-list primitives (useful when we want to
@@ -266,10 +267,10 @@ def checkOTFInfoVersion():
 # given a font file, populates fonthash for that font file
 # calls classifyFont on each font file too
 def addToFonthash(font):
-  postScriptName = os.popen("otfinfo --postscript-name %s" % font).read()[:-1]
+  postScriptName = os.popen("otfinfo --postscript-name '%s'" % font).read()[:-1]
   fonthash[postScriptName] = {}
   fonthash[postScriptName]['filename'] = font
-  info = os.popen("otfinfo --info %s" % font).read()[:-1]
+  info = os.popen("otfinfo --info '%s'" % font).read()[:-1]
   for line in info.split('\n'):
     m = otfinfoRE.search(line)
     if m:
@@ -285,8 +286,8 @@ def addToFonthash(font):
 	fonthash[postScriptName]['vendor'] = urlRE.search(m.group(2)).group(1)
   if 'vendor' not in fonthash[postScriptName].keys():
     fonthash[postScriptName]['vendor'] = 'generic'
-  features = os.popen("otfinfo --features %s" % font).read()[:-1]
-  opticalSize = os.popen("otfinfo --optical-size %s" % font).read()[:-1]
+  features = os.popen("otfinfo --features '%s'" % font).read()[:-1]
+  opticalSize = os.popen("otfinfo --optical-size '%s'" % font).read()[:-1]
   m = opticalRE.search(opticalSize)
   if m:
     fonthash[postScriptName]['opticalSize'] = [m.group(1), m.group(2)]
@@ -298,7 +299,7 @@ def addToFonthash(font):
   for s in fonthash[postScriptName]['subfamily']:
     if s in ['regular', 'light', 'book', 'medium', 'regular', 'demibold', 'semibold', 'bold', 'black']:
       fonthash[postScriptName]['weight'].append(s)
-    if s in ['regular', 'condensed', 'cond', 'semicondensed', 'narrow', 'semiextended', 'extended']:
+    if s in ['regular', 'condensed', 'cond', 'semicondensed', 'narrow', 'thin', 'semiextended', 'extended']:
       fonthash[postScriptName]['width'].append(s)
     if s in ['regular', 'italic', 'slanted', 'oblique', 'outline']:
       fonthash[postScriptName]['variant'].append(s)
