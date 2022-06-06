@@ -375,6 +375,14 @@ def addToFonthash(font):
                 fonthash[postScriptName]["subfamily"] = (
                     re.sub("(?<=[a-z])(?=[A-Z])", " ", m.group(2)).lower().split()
                 )
+                # hardcode for ITC Berkeley Oldstyle Std
+                # - this has "book italic" and "italic" files
+                # - "book italic" will generate 'm' and 'it' for weight/variant
+                # - "italic" will also generate 'm' and 'it' for weight/variant
+                # - but "italic" should properly generate 'mb' and 'it' for weight/variant
+                #   so fix it here
+                if postScriptName == "BerkeleyStd-Italic":
+                    fonthash[postScriptName]["subfamily"] = ["medium", "italic"]
                 if "roman" in fonthash[postScriptName]["subfamily"]:
                     # replace 'roman' with 'regular'
                     roman_id = fonthash[postScriptName]["subfamily"].index("roman")
