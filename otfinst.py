@@ -302,10 +302,10 @@ def generateFontfiles(l):
 # string 2, then use only the family name contained in string 1. This
 # is the font name that Windows will expose to users.
 
-otfinfoversionRE = re.compile("([0-9]+\.[0-9]+)")
-otfinfoRE = re.compile("^(.*):\s+(.*)$")
-urlRE = re.compile("(\w*)\.(com|net|org|edu|de|fr|co\.uk)")
-opticalRE = re.compile("size range \(([\d.]+) pt, ([\d.]+) pt\]")
+otfinfoversionRE = re.compile(r"([0-9]+\.[0-9]+)")
+otfinfoRE = re.compile(r"^(.*):\s+(.*)$")
+urlRE = re.compile(r"(\w*)\.(com|net|org|edu|de|fr|co\.uk)")
+opticalRE = re.compile(r"size range \(([\d.]+) pt, ([\d.]+) pt\]")
 
 # list-to-string and string-to-list primitives (useful when we want to
 # index into a hash with a list - we use a string instead)
@@ -652,7 +652,7 @@ def generateFDandSTY():
         longsuffix = fontoptions
         print(
             (
-                "\ProvidesFile{%s.fd}[%s %s/%s]"
+                r"\ProvidesFile{%s.fd}[%s %s/%s]"
                 % (
                     fdfilebase,
                     datetime.date.today().strftime("%Y/%m/%d"),
@@ -712,7 +712,7 @@ def generateFDandSTY():
                     else:
                         print("  <-> ", end=" ", file=fddest)
                     print(
-                        "\%s@scaled " % letterize(berryname[fontbase]),
+                        r"\%s@scaled " % letterize(berryname[fontbase]),
                         end=" ",
                         file=fddest,
                     )
@@ -854,7 +854,7 @@ def generateFDandSTY():
             str += "[%s]" % scaled[berryname[fontbase]]
         else:
             str += "[1.0]"
-        str += "{\def\%s@scaled{s*[#1]}}" % letterize(berryname[fontbase])
+        str += r"{\def\%s@scaled{s*[#1]}}" % letterize(berryname[fontbase])
         print(str, file=stydest)
         str = r"\define@key{%s}{family}[rm]{\def\%s@family{#1}}" % (
             letterize(berryname[fontbase]),
