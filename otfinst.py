@@ -978,10 +978,25 @@ def executeCommands():
     # not thrilled to use "-user". but by default, updmap.cfg is in
     # /opt, and /opt should not be writable. so -user it is.
     if not dryrun:
-        # Refresh the filename database so kpathsea can find the new
+        # otftotfm writes the .sty/.fd into TEXMFHOME (~/Library/texmf)
+        # but the .tfm/.vf/.pfb/.enc/.map go into TEXMFVAR
+        # (~/.texlive*/texmf-var). Hash and scan both.
+        texmf_roots = []
+        for var in ("TEXMFHOME", "TEXMFVAR"):
+            try:
+                root = (
+                    subprocess.check_output(["kpsewhich", "-var-value=" + var])
+                    .decode()
+                    .strip()
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                root = ""
+            if root and root not in texmf_roots:
+                texmf_roots.append(root)
+        # Refresh the filename databases so kpathsea can find the new
         # TFMs/VFs/.fd/.map files before updmap tries to use them.
-        texmf_user = os.path.expanduser("~/Library/texmf")
-        os.system("texhash " + texmf_user)
+        for root in texmf_roots:
+            os.system("texhash " + root)
         # updmap-user does NOT auto-discover map files in TEXMF trees;
         # it only regenerates pdftex.map from maps already enabled in
         # updmap.cfg. (--syncwithtrees, which used to do discovery, has
@@ -990,12 +1005,21 @@ def executeCommands():
         # defers the pdftex.map rebuild so it only happens once.
         # --enable is idempotent, so re-running on the same vendor is
         # a no-op.
-        for mappath in glob.glob(
-            os.path.join(texmf_user, "fonts/map/dvips/*/*.map")
-        ):
-            os.system(
-                "updmap-user --nomkmap --enable Map=" + os.path.basename(mappath)
-            )
+        seen = set()
+        for root in texmf_roots:
+            for mappath in glob.glob(
+                os.path.join(root, "fonts/map/dvips/*/*.map")
+            ):
+                # Skip updmap's own output dir (psfonts.map,
+                # builtin35.map, etc.) — those are generated, not
+                # source maps to enable.
+                if os.path.basename(os.path.dirname(mappath)) == "updmap":
+                    continue
+                name = os.path.basename(mappath)
+                if name in seen:
+                    continue
+                seen.add(name)
+                os.system("updmap-user --nomkmap --enable Map=" + name)
         # single rebuild of pdftex.map / psfonts.map / etc.
         os.system("updmap-user")
 
