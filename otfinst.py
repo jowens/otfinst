@@ -194,6 +194,8 @@ berryname = {
     "TeX Gyre Schola": "qcs",
     "TeX Gyre Adventor": "qag",
     "TeX Gyre Chorus": "qzc",
+    "Berkeley Mono": "9by",
+    "Doves Type": "9dv",
 }
 
 # if you would like to scale the font by default, set it here as a float
@@ -972,15 +974,30 @@ def executeCommands():
         print(cmd)
         if not dryrun:
             os.system(cmd)
-    # typically these two need to be called at the end to clean up
+    # typically these need to be called at the end to clean up.
+    # not thrilled to use "-user". but by default, updmap.cfg is in
+    # /opt, and /opt should not be writable. so -user it is.
     if not dryrun:
-        # not thrilled to use "-user".
-        # but by default, updmap.cfg is in /opt, and /opt should not
-        # be writable. so -user it is.
-        os.system("updmap -user")
-        os.system("texhash")
-        # os.system("updmap --syncwithtrees")
-        os.system("updmap -user")
+        # Refresh the filename database so kpathsea can find the new
+        # TFMs/VFs/.fd/.map files before updmap tries to use them.
+        texmf_user = os.path.expanduser("~/Library/texmf")
+        os.system("texhash " + texmf_user)
+        # updmap-user does NOT auto-discover map files in TEXMF trees;
+        # it only regenerates pdftex.map from maps already enabled in
+        # updmap.cfg. (--syncwithtrees, which used to do discovery, has
+        # been removed from modern TeX Live.) So we have to explicitly
+        # --enable each per-vendor map otftotfm produced. --nomkmap
+        # defers the pdftex.map rebuild so it only happens once.
+        # --enable is idempotent, so re-running on the same vendor is
+        # a no-op.
+        for mappath in glob.glob(
+            os.path.join(texmf_user, "fonts/map/dvips/*/*.map")
+        ):
+            os.system(
+                "updmap-user --nomkmap --enable Map=" + os.path.basename(mappath)
+            )
+        # single rebuild of pdftex.map / psfonts.map / etc.
+        os.system("updmap-user")
 
 
 # break out all possibilities from a list
