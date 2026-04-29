@@ -42,9 +42,12 @@ import math
 import time
 import datetime
 import operator
+import collections
+import concurrent.futures
 import glob
 import shlex
 import subprocess
+import tempfile
 
 #######################################
 # BEGIN USER-SETTABLE VARIABLES
@@ -723,16 +726,24 @@ def generateFDandSTY():
                     # Pro/ACaslonPro-Regular.otf -fkern -fliga
                     # LY1--AdobeCaslonPro-Regular
 
+                    # Emit a structured record (argv list + vendor + source)
+                    # rather than a pre-formatted shell string, so that the
+                    # parallel runner in executeCommands() can group by source
+                    # .otf and inject a per-call --map-file without re-parsing.
+                    record_vendor = explodedFonts[family][se][sh][op]["vendor"]
+                    record_source = explodedFonts[family][se][sh][op]["filename"]
+                    record_argv = [
+                        "otftotfm", "--no-updmap", "-a",
+                        *encodings[encoding]["commandline"].split(),
+                        "--typeface",
+                        niceFontName(explodedFonts[family][se][sh][op]["family"]),
+                        "--vendor", record_vendor,
+                        record_source,
+                        *explodedFonts[family][se][sh][op]["cmdlineoptions"].split(),
+                        explodedFonts[family][se][sh][op]["fontname"],
+                    ]
                     installcommands.append(
-                        'otftotfm --no-updmap -a %s --typeface "%s" --vendor "%s" "%s" %s %s'
-                        % (
-                            encodings[encoding]["commandline"],
-                            niceFontName(explodedFonts[family][se][sh][op]["family"]),
-                            explodedFonts[family][se][sh][op]["vendor"],
-                            explodedFonts[family][se][sh][op]["filename"],
-                            explodedFonts[family][se][sh][op]["cmdlineoptions"],
-                            explodedFonts[family][se][sh][op]["fontname"],
-                        )
+                        {"argv": record_argv, "vendor": record_vendor, "source": record_source}
                     )
                 print("}{}", file=fddest)
         # rest of fd part:
@@ -963,65 +974,159 @@ def executeCommands():
             "Error: You don't seem to have specified any valid OTF fonts (or directories with OTF fonts in them).\n"
         )
         sys.exit()
-    # call updmap manually at the end instead
-    # installcommands[-1] = installcommands[-1].replace(" --no-updmap", "")
-    for cmd in installcommands:
-        print(cmd)
-        if not dryrun:
-            # installcommands holds pre-built shell-style strings
-            # (see line ~732); shlex.split tokenizes without invoking
-            # a shell so we still get safe argv handling.
-            subprocess.run(shlex.split(cmd))
-    # typically these need to be called at the end to clean up.
-    # not thrilled to use "-user". but by default, updmap.cfg is in
-    # /opt, and /opt should not be writable. so -user it is.
-    if not dryrun:
-        # otftotfm writes the .sty/.fd into TEXMFHOME (~/Library/texmf)
-        # but the .tfm/.vf/.pfb/.enc/.map go into TEXMFVAR
-        # (~/.texlive*/texmf-var). Hash and scan both.
-        texmf_roots = []
-        for var in ("TEXMFHOME", "TEXMFVAR"):
+
+    if dryrun:
+        for record in installcommands:
+            print(" ".join(shlex.quote(a) for a in record["argv"]))
+        return
+
+    # Discover TEXMF roots up front: we need TEXMFHOME both to pick the
+    # install root and to know where to merge map fragments.
+    def _kpse(var):
+        try:
+            return (
+                subprocess.check_output(["kpsewhich", "-var-value=" + var])
+                .decode()
+                .strip()
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return ""
+
+    texmfhome = _kpse("TEXMFHOME")
+    texmfvar = _kpse("TEXMFVAR")
+    texmf_roots = [r for r in (texmfhome, texmfvar) if r]
+
+    # Install everything into TEXMFHOME (~/Library/texmf). Recent
+    # otftotfm versions default to TEXMFVAR (~/.texlive*/texmf-var),
+    # but TEXMFVAR is treated by TeX Live as regenerable cache and gets
+    # wiped on TL upgrades or cleanup runs -- not where you want
+    # licensed fonts to live. otftotfm consults TEXMFVAR to pick the
+    # TDS root for its automatic mode, so overriding that one env var
+    # for the subprocess routes every output (.tfm/.vf/.pfb/.enc/.map)
+    # into TEXMFHOME instead.
+    install_root = texmfhome or texmfvar
+    otftotfm_env = os.environ.copy()
+    if texmfhome:
+        otftotfm_env["TEXMFVAR"] = texmfhome
+
+    # Group installcommands by source .otf path. Calls sharing a source
+    # would race writing the same Type 1 .pfb, so within a group we run
+    # serially; across groups we run concurrently.
+    groups = collections.OrderedDict()
+    for record in installcommands:
+        groups.setdefault(record["source"], []).append(record)
+
+    # Per-call private map fragment. Each otftotfm invocation gets a
+    # unique --map-file=<tmp>, so concurrent same-vendor calls never
+    # contend on <vendor>.map. We merge fragments into the canonical
+    # vendor map below in a single serial pass.
+    tmpdir = tempfile.mkdtemp(prefix="otfinst-")
+    for idx, record in enumerate(installcommands):
+        record["map_fragment"] = os.path.join(tmpdir, "frag-%05d.map" % idx)
+        record["argv"] = record["argv"] + ["--map-file=" + record["map_fragment"]]
+
+    def run_group(group):
+        # Run one source-group's commands sequentially. We capture
+        # output so concurrent processes don't scramble the terminal;
+        # the whole group's transcript is returned for the parent to
+        # print as one block.
+        chunks = []
+        for record in group:
+            chunks.append("$ " + " ".join(shlex.quote(a) for a in record["argv"]))
+            result = subprocess.run(
+                record["argv"],
+                capture_output=True,
+                text=True,
+                env=otftotfm_env,
+            )
+            if result.stdout:
+                chunks.append(result.stdout.rstrip("\n"))
+            if result.stderr:
+                chunks.append(result.stderr.rstrip("\n"))
+            if result.returncode != 0:
+                chunks.append("[exit code %d]" % result.returncode)
+        return "\n".join(chunks)
+
+    max_workers = os.cpu_count() or 4
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_group, g) for g in groups.values()]
+        for fut in concurrent.futures.as_completed(futures):
+            print(fut.result())
+
+    # Merge per-call map fragments into canonical per-vendor map files
+    # under the install root (TEXMFHOME). Dedupe by the entry's first
+    # whitespace-separated token (the display name); preserve any
+    # pre-existing entries.
+    if install_root:
+        per_vendor = collections.defaultdict(list)
+        for record in installcommands:
+            frag = record.get("map_fragment")
+            if frag and os.path.exists(frag) and os.path.getsize(frag) > 0:
+                per_vendor[record["vendor"]].append(frag)
+        for vendor, frags in per_vendor.items():
+            mapdir = os.path.join(install_root, "fonts/map/dvips", vendor)
+            os.makedirs(mapdir, exist_ok=True)
+            mapfile = os.path.join(mapdir, vendor + ".map")
+            entries = collections.OrderedDict()  # display-name -> full line
+            sources = [mapfile] + frags if os.path.exists(mapfile) else list(frags)
+            for src in sources:
+                with open(src) as fp:
+                    for line in fp:
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("%"):
+                            continue
+                        key = stripped.split(None, 1)[0]
+                        entries[key] = line.rstrip("\n")
+            with open(mapfile, "w") as fp:
+                fp.write(
+                    "% Automatically maintained by otftotfm or other programs. Do not edit.\n\n"
+                )
+                for line in entries.values():
+                    fp.write(line + "\n")
+
+    # Clean up the tempdir (best-effort).
+    for record in installcommands:
+        frag = record.get("map_fragment")
+        if frag and os.path.exists(frag):
             try:
-                root = (
-                    subprocess.check_output(["kpsewhich", "-var-value=" + var])
-                    .decode()
-                    .strip()
-                )
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                root = ""
-            if root and root not in texmf_roots:
-                texmf_roots.append(root)
-        # Refresh the filename databases so kpathsea can find the new
-        # TFMs/VFs/.fd/.map files before updmap tries to use them.
-        for root in texmf_roots:
-            subprocess.run(["texhash", root])
-        # updmap-user does NOT auto-discover map files in TEXMF trees;
-        # it only regenerates pdftex.map from maps already enabled in
-        # updmap.cfg. (--syncwithtrees, which used to do discovery, has
-        # been removed from modern TeX Live.) So we have to explicitly
-        # --enable each per-vendor map otftotfm produced. --nomkmap
-        # defers the pdftex.map rebuild so it only happens once.
-        # --enable is idempotent, so re-running on the same vendor is
-        # a no-op.
-        seen = set()
-        for root in texmf_roots:
-            for mappath in glob.glob(
-                os.path.join(root, "fonts/map/dvips/*/*.map")
-            ):
-                # Skip updmap's own output dir (psfonts.map,
-                # builtin35.map, etc.) — those are generated, not
-                # source maps to enable.
-                if os.path.basename(os.path.dirname(mappath)) == "updmap":
-                    continue
-                name = os.path.basename(mappath)
-                if name in seen:
-                    continue
-                seen.add(name)
-                subprocess.run(
-                    ["updmap-user", "--nomkmap", "--enable", "Map=" + name]
-                )
-        # single rebuild of pdftex.map / psfonts.map / etc.
-        subprocess.run(["updmap-user"])
+                os.unlink(frag)
+            except OSError:
+                pass
+    try:
+        os.rmdir(tmpdir)
+    except OSError:
+        pass
+
+    # Refresh the filename databases so kpathsea can find the new
+    # TFMs/VFs/.fd/.map files before updmap tries to use them.
+    for root in texmf_roots:
+        subprocess.run(["texhash", root])
+    # updmap-user does NOT auto-discover map files in TEXMF trees;
+    # it only regenerates pdftex.map from maps already enabled in
+    # updmap.cfg. (--syncwithtrees, which used to do discovery, has
+    # been removed from modern TeX Live.) So we have to explicitly
+    # --enable each per-vendor map otftotfm produced. --nomkmap
+    # defers the pdftex.map rebuild so it only happens once.
+    # --enable is idempotent, so re-running on the same vendor is
+    # a no-op.
+    seen = set()
+    for root in texmf_roots:
+        for mappath in glob.glob(
+            os.path.join(root, "fonts/map/dvips/*/*.map")
+        ):
+            # Skip updmap's own output dir (psfonts.map, builtin35.map,
+            # etc.) -- those are generated, not source maps to enable.
+            if os.path.basename(os.path.dirname(mappath)) == "updmap":
+                continue
+            name = os.path.basename(mappath)
+            if name in seen:
+                continue
+            seen.add(name)
+            subprocess.run(
+                ["updmap-user", "--nomkmap", "--enable", "Map=" + name]
+            )
+    # single rebuild of pdftex.map / psfonts.map / etc.
+    subprocess.run(["updmap-user"])
 
 
 # break out all possibilities from a list
