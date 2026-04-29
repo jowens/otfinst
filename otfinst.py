@@ -43,6 +43,7 @@ import time
 import datetime
 import operator
 import glob
+import shlex
 import subprocess
 
 #######################################
@@ -230,13 +231,11 @@ CFFRE = re.compile("CFF")
 
 
 def isValidFontFile(filename):
-    # return os.system("otfinfo --info -q %s" % filename) == 0
-    p = subprocess.Popen(
-        ["otfinfo", "-qt", filename],  # "'%s'" % filename],
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-    )
-    output, _ = p.communicate()
+    output = subprocess.run(
+        ["otfinfo", "-qt", filename],
+        capture_output=True,
+        text=True,
+    ).stdout
 
     # otfinfo -qt returns the fields in the font file; "glyf" means TrueType
     # and "CFF" means PostScript
@@ -329,11 +328,11 @@ def s2l(s):
 
 
 def checkOTFInfoVersion():
-    p = subprocess.Popen(
-        ["otfinfo", "--version"], universal_newlines=True, stdout=subprocess.PIPE
-    )
-    output, _ = p.communicate()
-    otfiv = output.strip()
+    otfiv = subprocess.run(
+        ["otfinfo", "--version"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     m = otfinfoversionRE.search(otfiv)
     if float(m.group(1)) < 2.38:
         sys.stderr.write(
@@ -348,21 +347,19 @@ def checkOTFInfoVersion():
 
 
 def addToFonthash(font):
-    p = subprocess.Popen(
+    postScriptName = subprocess.run(
         ["otfinfo", "--postscript-name", font],
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-    )
-    output, _ = p.communicate()
-    postScriptName = output.strip()
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     fonthash[postScriptName] = {}
     fonthash[postScriptName]["filename"] = font
     print("PS name is %s, font is %s" % (postScriptName, font))
-    p = subprocess.Popen(
-        ["otfinfo", "--info", font], universal_newlines=True, stdout=subprocess.PIPE
-    )
-    output, _ = p.communicate()
-    info = output.strip()
+    info = subprocess.run(
+        ["otfinfo", "--info", font],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     for line in info.split(os.linesep):
         m = otfinfoRE.search(line)
         if m:
@@ -402,19 +399,17 @@ def addToFonthash(font):
     if "vendor" not in list(fonthash[postScriptName].keys()):
         fonthash[postScriptName]["vendor"] = "generic"
 
-    p = subprocess.Popen(
-        ["otfinfo", "--features", font], universal_newlines=True, stdout=subprocess.PIPE
-    )
-    output, _ = p.communicate()
-    features = output.strip()
+    features = subprocess.run(
+        ["otfinfo", "--features", font],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
-    p = subprocess.Popen(
+    opticalSize = subprocess.run(
         ["otfinfo", "--optical-size", font],
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-    )
-    output, _ = p.communicate()
-    opticalSize = output.strip()
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     m = opticalRE.search(opticalSize)
     if m:
         # convert from OTF's (exclusive, inclusive] to TeX's [inclusive, exclusive)
@@ -973,7 +968,10 @@ def executeCommands():
     for cmd in installcommands:
         print(cmd)
         if not dryrun:
-            os.system(cmd)
+            # installcommands holds pre-built shell-style strings
+            # (see line ~732); shlex.split tokenizes without invoking
+            # a shell so we still get safe argv handling.
+            subprocess.run(shlex.split(cmd))
     # typically these need to be called at the end to clean up.
     # not thrilled to use "-user". but by default, updmap.cfg is in
     # /opt, and /opt should not be writable. so -user it is.
@@ -996,7 +994,7 @@ def executeCommands():
         # Refresh the filename databases so kpathsea can find the new
         # TFMs/VFs/.fd/.map files before updmap tries to use them.
         for root in texmf_roots:
-            os.system("texhash " + root)
+            subprocess.run(["texhash", root])
         # updmap-user does NOT auto-discover map files in TEXMF trees;
         # it only regenerates pdftex.map from maps already enabled in
         # updmap.cfg. (--syncwithtrees, which used to do discovery, has
@@ -1019,9 +1017,11 @@ def executeCommands():
                 if name in seen:
                     continue
                 seen.add(name)
-                os.system("updmap-user --nomkmap --enable Map=" + name)
+                subprocess.run(
+                    ["updmap-user", "--nomkmap", "--enable", "Map=" + name]
+                )
         # single rebuild of pdftex.map / psfonts.map / etc.
-        os.system("updmap-user")
+        subprocess.run(["updmap-user"])
 
 
 # break out all possibilities from a list
@@ -1044,13 +1044,11 @@ def breakout(lyst):
 
 
 def filenameInLocaldir(str):
-    p = subprocess.Popen(
+    texmfhome = subprocess.run(
         ["kpsewhich", "-expand-path=$TEXMFHOME"],
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-    )
-    output, _ = p.communicate()
-    texmfhome = output.strip()
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     print(texmfhome)
     return texmfhome + localfontsdir + str
 
